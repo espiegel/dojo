@@ -4,7 +4,8 @@ const tough = require("tough-cookie");
 const fs = require("fs");
 const Path = require("path");
 const moment = require("moment");
-const RateLimiter = require("limiter").RateLimiter;
+const mkdirp = require("mkdirp");
+const { RateLimit } = require("async-sema");
 require("dotenv").config()
 
 // install cookie jar
@@ -19,27 +20,26 @@ const FEED_URL = "https://home.classdojo.com/api/storyFeed?includePrivate=true";
 const IMAGE_DIR = "images";
 const DATE_FORMAT = "YYYY-MM-DD";
 const MAX_FEEDS = 30;
-const QPS = 15;
-const LIMITER = new RateLimiter(QPS, "second");
+const CONCURRENCY = 15;
+const LIMITER = RateLimit(CONCURRENCY);
 
 let feedsProcessed = 0;
 
 async function main() {
     await login();
 
-    const feed = await getFeed(FEED_URL);
-    if (feed) {
-        await processFeed(feed);
-    } else {
-        console.log("Couldn't get feed");
+    try {
+        await processFeed(FEED_URL);
+    } catch (error) {
+        console.log("Couldn't get feed", error);
     }
 }
 
 async function login() {
     return await axios.post(LOGIN_URL, {
-        "login": process.env.DOJO_EMAIL,
-        "password": process.env.DOJO_PASSWORD,
-        "resumeAddClassFlow": false
+        login: process.env.DOJO_EMAIL,
+        password: process.env.DOJO_PASSWORD,
+        resumeAddClassFlow: false
     });
 }
 
@@ -48,73 +48,72 @@ async function getFeed(url) {
     return storyFeed.data;
 }
 
-async function processFeed(feed) {
+async function processFeed(url) {
+    const feed = await getFeed(url);
+
     feedsProcessed++;
-    console.log("feed items", feed._items.length);
+    console.log(`found ${feed._items.length} feed items...`);
+
     for (const item of feed._items) {
         const time = item.time;
         const date = moment(time).format(DATE_FORMAT);
+        await createDirectory(Path.resolve(__dirname, IMAGE_DIR, date));
 
         const contents = item.contents;
-
         const attachments = contents.attachments;
-        for (const attachment of attachments) {
 
+        for (const attachment of attachments) {
             const url = attachment.path;
-            await createDirectory(Path.resolve(__dirname, IMAGE_DIR, date));
             const filename = getFilePath(date, url.substring(url.lastIndexOf("/") + 1));
 
-            await downloadFileIfNotExists(url, filename);
+            await LIMITER();
+            downloadFileIfNotExists(url, filename);
         }
     }
 
     console.log("-----------------------------------------------------------------------");
-    console.log(`finished going through feed, feedsProcessed = ${feedsProcessed} / ${MAX_FEEDS}`);
+    console.log(`finished processing feed, feedsProcessed = ${feedsProcessed} / ${MAX_FEEDS}`);
     console.log("-----------------------------------------------------------------------");
     if (feedsProcessed < MAX_FEEDS && feed._links && feed._links.prev && feed._links.prev.href) {
         const previousLink = feed._links.prev.href;
         console.log(`found previous link ${previousLink}`);
 
         try {
-            const feed = await getFeed(previousLink);
-            await processFeed(feed);
+            await processFeed(previousLink);
         } catch (error) {
-            console.error("failed to get feed", error);
+            console.error("Couldn't get feed", error);
         }
     }
 }
 
 async function createDirectory(path) {
-    return fs.promises.mkdir(path, {recursive: true})
-        .catch(error => {
-            // noop
-        });
+    return new Promise((resolve, reject) => {
+        mkdirp.sync(path);
+        resolve();
+    });
 }
 
 async function downloadFileIfNotExists(url, filePath) {
     const exists = await fileExists(filePath);
     console.log(`file ${filePath} exists = ${exists}`);
     if (!exists) {
-        await new Promise((resolve, reject) => {
-            LIMITER.removeTokens(1, function(err, remainingRequests) {
-                resolve();
-            });
-        });
         try {
             await downloadFile(url, filePath);
         } catch (error) {
-            console.error("Failed to download file ", url, error);
+            console.error("Failed to download file ", url);
         }
     }
 }
 
 async function fileExists(filePath) {
-    try {
-        await fs.promises.access(filePath);
-        return true;
-    } catch (error) {
-        return false;
-    }
+    return new Promise((resolve, reject) => {
+        try {
+            fs.accessSync(filePath, fs.constants.R_OK | fs.constants.W_OK);
+            resolve(true);
+        } catch (err) {
+            resolve(false);
+        }
+    });
 }
 
 function getFilePath(date, filename) {
@@ -132,7 +131,10 @@ async function downloadFile(url, filePath) {
     response.data.pipe(writer);
 
     return new Promise((resolve, reject) => {
-        writer.on("finish", resolve)
+        writer.on("finish", () => {
+            console.log(`finished downloading ${filePath}`);
+            resolve();
+        })
         writer.on("error", reject)
     });
 }
