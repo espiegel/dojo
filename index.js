@@ -26,7 +26,12 @@ const LIMITER = RateLimit(CONCURRENCY);
 let feedsProcessed = 0;
 
 async function main() {
-    await login();
+    try {
+        await login();
+    } catch (error) {
+        console.error("Failed to login to ClassDojo, double check your .env file", error);
+        process.exit();
+    }
 
     try {
         await processFeed(FEED_URL);
@@ -36,6 +41,15 @@ async function main() {
 }
 
 async function login() {
+    checkEnv("DOJO_EMAIL");
+    checkEnv("DOJO_PASSWORD");
+
+    function checkEnv(variable) {
+        if (!process.env[variable]) {
+            throw new Error(`${variable} not set in the .env file. Please follow the instructions on the README of the project.`);
+        }
+    }
+
     return await axios.post(LOGIN_URL, {
         login: process.env.DOJO_EMAIL,
         password: process.env.DOJO_PASSWORD,
