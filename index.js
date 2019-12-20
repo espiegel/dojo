@@ -71,10 +71,15 @@ async function processFeed(url) {
     for (const item of feed._items) {
         const time = item.time;
         const date = moment(time).format(DATE_FORMAT);
-        await createDirectory(Path.resolve(__dirname, IMAGE_DIR, date));
-
+        
         const contents = item.contents;
         const attachments = contents.attachments;
+
+        if (attachments === undefined || attachments.length == 0) {
+            //No files to download
+            continue;
+        }
+        await createDirectory(Path.resolve(__dirname, IMAGE_DIR, date));
 
         for (const attachment of attachments) {
             const url = attachment.path;
